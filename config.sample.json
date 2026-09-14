@@ -1,0 +1,20 @@
+{
+    "listen_ip": "127.0.0.1",
+    "port": 9100,
+    "save_raw": true,
+    "save_pdf": true,
+    "debug": false,
+    "dpi": 300,
+    "default_label_width_mm": 58.0,
+    "default_label_height_mm": 40.0,
+    "graphics_black_bit": 0,
+    "rotate_output_deg": 180,
+    "max_copies_in_pdf": 10,
+    "forward_to_printer": false,
+    "printer_name": "",
+    "printer_rotate_deg": 0,
+    "auto_label_size": true,
+    "label_length_margin_mm": 0.0,
+    "idle_timeout_sec": 2.0,
+    "max_job_size_bytes": 52428800
+}

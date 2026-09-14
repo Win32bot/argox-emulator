@@ -1,0 +1,23 @@
+# --- Данные захвата (НЕ публиковать: содержат реальные этикетки/серийники) ---
+Jobs/
+PDF/
+Logs/
+config.json
+
+# --- Сборка PyInstaller ---
+build/
+dist/
+*.spec
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- Бинарники/прочее ---
+*.exe
+*.crop.png
+Thumbs.db
+.DS_Store
