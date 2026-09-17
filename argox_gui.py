@@ -95,6 +95,21 @@ class App(tk.Tk):
         self.var_autosize = tk.BooleanVar(value=bool(self.cfg.get("auto_label_size", True)))
         ttk.Checkbutton(fwd, text="Авторазмер этикетки",
                         variable=self.var_autosize).pack(side="left", padx=(12, 0))
+
+        # режим печати: растр или нативный EPL-проброс
+        fwd2 = ttk.Frame(self)
+        fwd2.pack(fill="x", **pad)
+        ttk.Label(fwd2, text="Режим печати:").pack(side="left")
+        self._mode_labels = {"raster": "Растр (через драйвер Windows)",
+                             "epl": "EPL — нативно (Godex в режиме эмуляции EPL)"}
+        self._mode_by_label = {v: k for k, v in self._mode_labels.items()}
+        cur_mode = str(self.cfg.get("forward_mode", "raster"))
+        self.var_mode = tk.StringVar(value=self._mode_labels.get(cur_mode,
+                                                                 self._mode_labels["raster"]))
+        ttk.Combobox(fwd2, textvariable=self.var_mode,
+                     values=list(self._mode_labels.values()),
+                     width=44, state="readonly").pack(side="left", padx=(4, 0))
+
         if not E.HAVE_WIN32:
             self.cmb_printer.configure(state="disabled")
             ttk.Label(fwd, text="(нет pywin32)", foreground="#b00").pack(side="left", padx=6)
@@ -146,6 +161,7 @@ class App(tk.Tk):
         cfg["forward_to_printer"] = self.var_fwd.get()
         cfg["printer_name"] = self.var_printer.get().strip()
         cfg["auto_label_size"] = self.var_autosize.get()
+        cfg["forward_mode"] = self._mode_by_label.get(self.var_mode.get(), "raster")
         if cfg["forward_to_printer"] and not cfg["printer_name"]:
             raise ValueError("Отмечено «Печатать на Godex», но принтер не выбран")
         # запомним настройки на следующий запуск

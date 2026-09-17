@@ -125,6 +125,19 @@ DEFAULT_CONFIG = {
     # исходный поток, а готовый растр этикетки, отрисованный эмулятором,
     # через установленный в Windows драйвер Godex (конвертация не нужна).
     "forward_to_printer": False,
+    # Режим пересылки на принтер:
+    #   "raster" — рендер этикетки картинкой через драйвер Windows (универсально);
+    #   "epl"    — «нативный» проброс: слать сами команды Argox (PPLB=EPL2)
+    #              напрямую на принтер (RAW). Требует, чтобы Godex был в режиме
+    #              эмуляции EPL/GEPL. Штрихкоды/2D рисует прошивка принтера.
+    "forward_mode": "raster",
+    # Масштаб координат для epl-проброса: источник(Argox)_dpi -> приёмник(Godex)_dpi.
+    # Argox 3140 = 300, Godex G300 = 203. Пока для первого теста epl_scale=False —
+    # шлём поток как есть (этикетка выйдет ~на 32% мельче, но станет ясно, что
+    # нативная печать работает). Масштабирование включим следующим шагом.
+    "epl_source_dpi": 300,
+    "epl_target_dpi": 203,
+    "epl_scale": False,
     # Имя принтера в Windows («Устройства и принтеры»), напр. "Godex G330".
     "printer_name": "",
     # Доп. поворот только для печати (если на Godex выходит перевёрнуто): 0/90/180/270.
@@ -852,6 +865,30 @@ def _open_print_dc(name, width_mm, length_mm):
     return dc
 
 
+def send_raw_to_printer(printer_name, data: bytes):
+    """«Нативный» проброс: отправляет байты как есть на принтер (RAW),
+    минуя рендер драйвера Windows. Для Godex в режиме эмуляции EPL/GEPL —
+    команды Argox (PPLB=EPL2) исполняет прошивка принтера. Возвращает
+    число отправленных байт."""
+    if not HAVE_WIN32:
+        raise RuntimeError("pywin32 не установлен — печать недоступна")
+    name = str(printer_name).strip()
+    if not name:
+        raise RuntimeError("не задано имя принтера (printer_name)")
+    h = win32print.OpenPrinter(name)
+    try:
+        win32print.StartDocPrinter(h, 1, ("Argox EPL passthrough", None, "RAW"))
+        try:
+            win32print.StartPagePrinter(h)
+            win32print.WritePrinter(h, data)
+            win32print.EndPagePrinter(h)
+        finally:
+            win32print.EndDocPrinter(h)
+    finally:
+        win32print.ClosePrinter(h)
+    return len(data)
+
+
 def print_pages_to_printer(cfg, pages, output_file=None):
     """Печатает готовые растровые этикетки на принтер (драйвер Windows).
     Размер этикетки для каждого задания выставляется автоматически
@@ -962,17 +999,26 @@ class EmulatorHandler(socketserver.BaseRequestHandler):
                 log(line, "DEBUG")
             log("------------------------", "DEBUG")
 
-        need_render = cfg.get("save_pdf", True) or cfg.get("forward_to_printer", False)
+        forward = cfg.get("forward_to_printer", False)
+        mode = cfg.get("forward_mode", "raster")
+
+        # Рендер нужен для PDF и для растровой печати; для epl-проброса — нет.
+        need_render = cfg.get("save_pdf", True) or (forward and mode != "epl")
+        label_pages = None
         if need_render:
-            self._render_and_output(cfg, data, job_id)
+            label_pages = self._render_and_savepdf(cfg, data, job_id)
+
+        if forward:
+            self._forward(cfg, data, job_id, label_pages)
 
         log(f"Job #{job_id} done")
 
-    def _render_and_output(self, cfg, data, job_id):
+    def _render_and_savepdf(self, cfg, data, job_id):
+        """Отрисовывает задание, сохраняет PDF, возвращает список этикеток (или None)."""
         if not HAVE_PIL:
             log("Pillow не установлен — рендер пропущен (pip install Pillow python-barcode)",
                 "WARNING")
-            return
+            return None
         try:
             renderer = EPLRenderer(cfg)
             label_pages = renderer.render_job(data)   # реальные этикетки или []
@@ -982,9 +1028,8 @@ class EmulatorHandler(socketserver.BaseRequestHandler):
                     log("render: " + w, "WARNING")
         except Exception as e:
             log(f"Ошибка рендера: {e!r}", "ERROR")
-            return
+            return None
 
-        # PDF (для нераспознанного потока — страница с HEX-дампом)
         if cfg.get("save_pdf", True):
             try:
                 pdf_pages = label_pages or [render_hexdump_page(cfg, data)]
@@ -993,25 +1038,43 @@ class EmulatorHandler(socketserver.BaseRequestHandler):
                 log(f"Saved PDF -> {pdf_path}")
             except Exception as e:
                 log(f"Ошибка сохранения PDF: {e!r}", "ERROR")
+        return label_pages
 
-        # Автопересылка на Godex (только реальные этикетки, не HEX-дамп)
-        if cfg.get("forward_to_printer", False):
-            name = str(cfg.get("printer_name", "")).strip()
-            if not label_pages:
-                log("Печать на Godex пропущена: поток не распознан как этикетка", "WARNING")
-            elif not name:
-                log("Печать на Godex пропущена: не выбран принтер", "WARNING")
-            else:
-                try:
-                    if cfg.get("auto_label_size", True):
-                        dpi = int(cfg.get("dpi", 300)) or 300
-                        p0 = label_pages[0]
-                        log(f"Размер этикетки: {p0.width / dpi * 25.4:.1f}×"
-                            f"{p0.height / dpi * 25.4:.1f} мм (авто)")
-                    n = print_pages_to_printer(cfg, label_pages)
-                    log(f"Отправлено на принтер «{name}»: {n} этикет.")
-                except Exception as e:
-                    log(f"Печать на Godex не удалась: {e!r}", "ERROR")
+    def _forward(self, cfg, data, job_id, label_pages):
+        name = str(cfg.get("printer_name", "")).strip()
+        if not name:
+            log("Печать пропущена: не выбран принтер", "WARNING")
+            return
+        mode = cfg.get("forward_mode", "raster")
+
+        if mode == "epl":
+            # «Нативный» проброс: команды Argox (PPLB=EPL2) прямо на принтер.
+            payload = data
+            if cfg.get("epl_scale", False):
+                log("epl_scale включён, но масштабирование ещё не реализовано — "
+                    "шлю поток как есть (этикетка может выйти мельче)", "WARNING")
+            try:
+                n = send_raw_to_printer(name, payload)
+                log(f"Отправлено на «{name}» нативно (EPL RAW): {n} байт. "
+                    "Убедитесь, что принтер в режиме эмуляции EPL/GEPL.")
+            except Exception as e:
+                log(f"Нативная печать (EPL) не удалась: {e!r}", "ERROR")
+            return
+
+        # Растровый режим (через драйвер Windows)
+        if not label_pages:
+            log("Печать на Godex пропущена: поток не распознан как этикетка", "WARNING")
+            return
+        try:
+            if cfg.get("auto_label_size", True):
+                dpi = int(cfg.get("dpi", 300)) or 300
+                p0 = label_pages[0]
+                log(f"Размер этикетки: {p0.width / dpi * 25.4:.1f}×"
+                    f"{p0.height / dpi * 25.4:.1f} мм (авто)")
+            n = print_pages_to_printer(cfg, label_pages)
+            log(f"Отправлено на принтер «{name}»: {n} этикет.")
+        except Exception as e:
+            log(f"Печать на Godex не удалась: {e!r}", "ERROR")
 
 
 class ThreadingTCPServerReuse(socketserver.ThreadingTCPServer):
