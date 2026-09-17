@@ -74,6 +74,18 @@ try:
 except Exception:  # pragma: no cover
     HAVE_WIN32 = False
 
+try:
+    import qrcode as _qrcode
+    HAVE_QR = True
+except Exception:  # pragma: no cover
+    HAVE_QR = False
+
+try:
+    from pystrich.datamatrix import DataMatrixEncoder as _DataMatrixEncoder
+    HAVE_DMTX = True
+except Exception:  # pragma: no cover
+    HAVE_DMTX = False
+
 
 # --------------------------------------------------------------------------
 # Базовые пути и конфигурация
@@ -369,8 +381,16 @@ class EPLRenderer:
                 yield data[i:end]
                 i = end
             else:
-                yield data[i:j]
-                i = j
+                # Данные в кавычках (команды A/B/b) могут содержать CR/LF —
+                # не рвём токен, пока кавычки не закрыты.
+                end = j
+                if data[i:j].count(b'"') % 2 == 1:
+                    k = j
+                    while k < n and data[i:k].count(b'"') % 2 == 1:
+                        k += 1
+                    end = k
+                yield data[i:end]
+                i = end
 
     def _read_gm_end(self, data, start, header_end):
         m = re.match(rb'GM"[^"]*"(\d+)', data[start:header_end + 2])
@@ -631,25 +651,69 @@ class EPLRenderer:
             buf = io.BytesIO()
             obj.write(buf, options)
             buf.seek(0)
-            return Image.open(buf).convert("L")
+            img = Image.open(buf).convert("L")
+            # python-barcode добавляет поля/место под текст -> обрезаем до
+            # реального содержимого, иначе высота не равна EPL-параметру h
+            # и штрихкод (при rotation=2) наезжает на соседние элементы.
+            inv = Image.eval(img, lambda p: 255 - p)
+            bbox = inv.getbbox()
+            if bbox:
+                img = img.crop(bbox)
+            return img
         except Exception as e:
             self.warnings.append(f"barcode {name}('{text}'): {e}")
             return None
 
     def _draw_barcode2d(self, cur, rest):
-        # QR/Datamatrix/PDF417 — пока плейсхолдер (нет 2D-движка).
+        # Команда b: 2D-код.  b x,y,ТИП,опции...,"данные"
+        #   ТИП: D = Data Matrix, Q = QR, P = PDF417
+        #   опции вида c<кол>,r<ряд>,h<размер модуля в точках>
         params, text = _split_epl_params(rest)
         if text is None:
             return
         x = _to_int(params[0], 0) if len(params) > 0 else 0
         y = _to_int(params[1], 0) if len(params) > 1 else 0
-        side = 120
-        img = Image.new("L", (side, side), 255)
-        dd = ImageDraw.Draw(img)
-        dd.rectangle([0, 0, side - 1, side - 1], outline=0)
-        dd.text((5, 5), "2D\n" + text[:24], fill=0, font=_load_mono_font(14))
-        cur.img.paste(img, (x, y))
-        self.warnings.append("2D-код (b) отрисован как плейсхолдер")
+        typ = (params[2].strip().upper()[:1] if len(params) > 2 and params[2].strip()
+               else "D")
+        # размер модуля (точек): опция h<n>, иначе 4
+        cell = 4
+        for p in params[3:]:
+            p = p.strip().lower()
+            if p.startswith("h") and p[1:].isdigit():
+                cell = max(2, int(p[1:]))
+        img = None
+        try:
+            if typ == "Q" and HAVE_QR:
+                qr = _qrcode.QRCode(border=2, box_size=max(2, cell),
+                                    error_correction=_qrcode.constants.ERROR_CORRECT_M)
+                qr.add_data(text)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black",
+                                    back_color="white").convert("L")
+            elif typ in ("D", "") and HAVE_DMTX:
+                png = _DataMatrixEncoder(text).get_imagedata(cellsize=max(2, cell))
+                img = Image.open(io.BytesIO(png)).convert("L")
+            elif typ == "Q" and HAVE_DMTX:  # QR нет — хотя бы Data Matrix
+                png = _DataMatrixEncoder(text).get_imagedata(cellsize=max(2, cell))
+                img = Image.open(io.BytesIO(png)).convert("L")
+                self.warnings.append("QR-движок недоступен, отрисован Data Matrix")
+        except Exception as e:
+            self.warnings.append(f"2D {typ} ('{text[:20]}...'): {e!r}")
+            img = None
+
+        if img is None:
+            # движок недоступен — заметный плейсхолдер, чтобы было видно место
+            side = max(40, cell * 24)
+            img = Image.new("L", (side, side), 255)
+            dd = ImageDraw.Draw(img)
+            dd.rectangle([0, 0, side - 1, side - 1], outline=0)
+            dd.text((4, 4), "2D?", fill=0, font=_load_mono_font(14))
+            self.warnings.append(f"2D-код типа {typ} не отрисован (нет движка)")
+
+        gray = img.convert("L")
+        mask = Image.eval(gray, lambda p: 255 - p)
+        black = Image.new("L", gray.size, 0)
+        cur.img.paste(black, (x, y), mask)
 
     def _draw_line(self, cur, kind, rest):
         parts = rest.split(",")

@@ -14,6 +14,7 @@
         --hidden-import win32print --hidden-import win32ui ^
         --hidden-import win32gui --hidden-import win32con ^
         --hidden-import PIL.ImageWin ^
+        --collect-all qrcode --collect-all pystrich ^
         argox_gui.py
 """
 
